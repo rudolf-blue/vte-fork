@@ -1927,7 +1927,7 @@ fn handle_colon_rgb(params: &[u16]) -> Option<Color> {
 }
 
 /// Parse a color specifier from list of attributes.
-fn parse_sgr_color(params: &mut dyn Iterator<Item = u16>) -> Option<Color> {
+fn parse_sgr_color(params: &mut impl Iterator<Item = u16>) -> Option<Color> {
     match params.next() {
         Some(2) => Some(Color::Spec(Rgb {
             r: u8::try_from(params.next()?).ok()?,
