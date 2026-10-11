@@ -603,6 +603,10 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
 
         // If the next character is ESC, just process it and short-circuit.
         if plain_chars == 0 {
+            if let Some(len) = self.advance_csi_direct(performer, &bytes[1..]) {
+                return 1 + len;
+            }
+
             self.state = State::Escape;
             self.reset_params();
             return 1;
@@ -615,6 +619,10 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
 
                 // If there's another character, it must be escape so process it directly.
                 if processed < num_bytes {
+                    if let Some(len) = self.advance_csi_direct(performer, &bytes[processed + 1..]) {
+                        return processed + 1 + len;
+                    }
+
                     self.state = State::Escape;
                     self.reset_params();
                     processed += 1;
@@ -665,6 +673,47 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 }
             },
         }
+    }
+
+    /// Dispatch a plain `CSI Ps ; Ps F` sequence without stepping the state
+    /// machine.
+    ///
+    /// `bytes` start right after the escape. Only digits and `;` before the
+    /// final byte are handled, anything else returns `None` so the state
+    /// machine parses the sequence.
+    ///
+    /// Returns the number of bytes consumed after the escape.
+    #[inline]
+    fn advance_csi_direct<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> Option<usize> {
+        if bytes.first() != Some(&b'[') {
+            return None;
+        }
+
+        self.reset_params();
+
+        let mut param = 0u16;
+        for (i, &byte) in bytes.iter().enumerate().skip(1) {
+            match byte {
+                b'0'..=b'9' => {
+                    param = param.saturating_mul(10).saturating_add((byte - b'0') as u16);
+                },
+                b';' | 0x40..=0x7E => {
+                    if self.params.is_full() {
+                        return None;
+                    }
+                    self.params.push(param);
+                    param = 0;
+
+                    if byte != b';' {
+                        performer.csi_dispatch(&self.params, &[], false, byte as char);
+                        return Some(i + 1);
+                    }
+                },
+                _ => return None,
+            }
+        }
+
+        None
     }
 
     /// Advance the parser while processing a partial utf8 codepoint.
@@ -1556,5 +1605,87 @@ mod tests {
         assert_eq!(dispatcher.dispatched.len(), 2);
         assert_eq!(dispatcher.dispatched[0], Sequence::Execute(0x18));
         assert_eq!(dispatcher.dispatched[1], Sequence::Execute(0x1A));
+    }
+
+    const ODD_BYTES: &[u8] = b"\x00\x07\x18\x1a\x7f\x1f\x20\x2f:?<>=!\"$\xff\x9b\xc3\x80";
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() >> 11) as usize % n
+        }
+    }
+
+    fn random_bytes(rng: &mut Rng) -> Vec<u8> {
+        let len = 1 + rng.below(200);
+        let mut bytes = Vec::new();
+        while bytes.len() < len {
+            match rng.below(15) {
+                0..=3 => bytes.extend_from_slice(b"\x1b["),
+                4 => bytes.push(0x1B),
+                5..=7 => {
+                    for _ in 0..1 + rng.below(4) {
+                        bytes.push(b'0' + rng.below(10) as u8);
+                    }
+                },
+                8 | 9 => bytes.push(b';'),
+                10 => bytes.push(0x40 + rng.below(0x3F) as u8),
+                11 => bytes.push(ODD_BYTES[rng.below(ODD_BYTES.len())]),
+                12 => bytes.extend_from_slice("é€😀".as_bytes()),
+                13 => bytes.extend_from_slice(b"99999999999;65535;65536"),
+                _ => bytes.extend_from_slice("1;".repeat(rng.below(40)).as_bytes()),
+            }
+        }
+        bytes
+    }
+
+    fn run(bytes: &[u8], chunks: &[usize]) -> Vec<Sequence> {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        let mut rest = bytes;
+        let mut chunks = chunks.iter().cycle();
+        while !rest.is_empty() {
+            let len = (*chunks.next().unwrap()).min(rest.len());
+            parser.advance(&mut dispatcher, &rest[..len]);
+            rest = &rest[len..];
+        }
+
+        dispatcher.dispatched
+    }
+
+    #[test]
+    fn csi_direct_matches_state_machine() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..20_000 {
+            let bytes = random_bytes(&mut rng);
+            let chunks: Vec<usize> = (0..8).map(|_| 1 + rng.below(40)).collect();
+
+            // Single byte chunks never reach the direct CSI path.
+            let expected = run(&bytes, &[1]);
+            assert_eq!(run(&bytes, &[bytes.len()]), expected);
+            assert_eq!(run(&bytes, &chunks), expected);
+        }
+    }
+
+    #[test]
+    fn csi_direct_param_limits() {
+        for count in [30, 31, 32, 33, 40] {
+            let mut bytes = b"\x1b[".to_vec();
+            for i in 0..count {
+                bytes.extend_from_slice(format!("{i};").as_bytes());
+            }
+            bytes.extend_from_slice(b"7m");
+
+            assert_eq!(run(&bytes, &[bytes.len()]), run(&bytes, &[1]));
+        }
     }
 }

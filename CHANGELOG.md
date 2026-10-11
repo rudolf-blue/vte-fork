@@ -4,6 +4,7 @@ CHANGELOG
 ## Unreleased
 
 - Character dropped after a UTF-8 codepoint split across two reads
+- Improve parsing performance of CSI sequences without intermediates
 
 ## 0.15.0
 
