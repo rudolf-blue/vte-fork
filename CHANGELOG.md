@@ -1,6 +1,10 @@
 CHANGELOG
 =========
 
+## Unreleased
+
+- Character dropped after a UTF-8 codepoint split across two reads
+
 ## 0.15.0
 
 - Support `CSI ? 5 W` to reset tabs stops to every 8th column

@@ -700,7 +700,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                     performer.print(c);
 
                     self.partial_utf8_len = 0;
-                    return valid_bytes - old_bytes;
+                    return c.len_utf8() - old_bytes;
                 }
 
                 match err.error_len() {
@@ -1455,6 +1455,22 @@ mod tests {
         assert_eq!(dispatcher.dispatched.len(), 2);
         assert_eq!(dispatcher.dispatched[0], Sequence::Print('ĸ'));
         assert_eq!(dispatcher.dispatched[1], Sequence::Print('🎉'));
+    }
+
+    #[test]
+    fn partial_utf8_followed_by_ascii() {
+        const INPUT: &str = "ĸaĸbĸc";
+
+        for split in 0..=INPUT.len() {
+            let mut dispatcher = Dispatcher::default();
+            let mut parser = Parser::new();
+
+            parser.advance(&mut dispatcher, &INPUT.as_bytes()[..split]);
+            parser.advance(&mut dispatcher, &INPUT.as_bytes()[split..]);
+
+            let expected: Vec<_> = INPUT.chars().map(Sequence::Print).collect();
+            assert_eq!(dispatcher.dispatched, expected, "split at {split}");
+        }
     }
 
     #[test]
