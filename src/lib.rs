@@ -593,12 +593,34 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// Advance the parser state from ground.
     ///
     /// The ground state is handled separately since it can only be left using
-    /// the escape character (`\x1b`). This allows more efficient parsing by
-    /// using SIMD search with [`memchr`].
+    /// the escape character (`\x1b`). Runs of plain ASCII are found in a single
+    /// scan, anything else goes through [`memchr`] and utf8 validation.
     #[inline]
     fn advance_ground<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
-        // Find the next escape character.
+        // Find the next escape or non-ASCII byte.
         let num_bytes = bytes.len();
+        let ascii_len = ascii_run_len(bytes);
+
+        if ascii_len > 0 {
+            // SAFETY: `ascii_run_len` only counts ASCII bytes, which are valid
+            // UTF-8.
+            let parsed = unsafe { str::from_utf8_unchecked(&bytes[..ascii_len]) };
+            Self::ground_dispatch_ascii(performer, parsed);
+
+            if ascii_len < num_bytes && bytes[ascii_len] == 0x1B {
+                if let Some(len) = self.advance_csi_direct(performer, &bytes[ascii_len + 1..]) {
+                    return ascii_len + 1 + len;
+                }
+
+                self.state = State::Escape;
+                self.reset_params();
+                return ascii_len + 1;
+            }
+
+            return ascii_len;
+        }
+
+        // Find the next escape character.
         let plain_chars = memchr::memchr(0x1B, bytes).unwrap_or(num_bytes);
 
         // If the next character is ESC, just process it and short-circuit.
@@ -778,6 +800,46 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             }
         }
     }
+
+    /// Like `ground_dispatch`, but batches the printable runs of an ASCII
+    /// string.
+    #[inline]
+    fn ground_dispatch_ascii<P: Perform>(performer: &mut P, text: &str) {
+        let bytes = text.as_bytes();
+        let mut start = 0;
+        while let Some(offset) = bytes[start..].iter().position(|&byte| byte < 0x20) {
+            let end = start + offset;
+            if offset > 0 {
+                performer.print_str(&text[start..end]);
+            }
+            performer.execute(bytes[end]);
+            start = end + 1;
+        }
+
+        if start < bytes.len() {
+            performer.print_str(&text[start..]);
+        }
+    }
+}
+
+/// Length of the leading run without ESC or non-ASCII bytes.
+#[inline]
+fn ascii_run_len(bytes: &[u8]) -> usize {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+
+    let mut chunks = bytes.chunks_exact(8);
+    let mut offset = 0;
+    for chunk in &mut chunks {
+        let word = u64::from_ne_bytes(chunk.try_into().unwrap());
+        let esc = word ^ (LO * 0x1B);
+        if (word & HI) | (esc.wrapping_sub(LO) & !esc & HI) != 0 {
+            break;
+        }
+        offset += 8;
+    }
+
+    offset + bytes[offset..].iter().take_while(|&&b| b != 0x1B && b < 0x80).count()
 }
 
 #[derive(PartialEq, Eq, Debug, Default, Copy, Clone)]
@@ -812,6 +874,13 @@ enum State {
 pub trait Perform {
     /// Draw a character to the screen and update states.
     fn print(&mut self, _c: char) {}
+
+    /// Draw a run of printable characters.
+    fn print_str(&mut self, text: &str) {
+        for c in text.chars() {
+            self.print(c);
+        }
+    }
 
     /// Execute a C0 or C1 control function.
     fn execute(&mut self, _byte: u8) {}
