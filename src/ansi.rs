@@ -260,7 +260,7 @@ struct SyncState<T: Timeout> {
 
 impl<T: Timeout> Default for SyncState<T> {
     fn default() -> Self {
-        Self { buffer: Vec::with_capacity(SYNC_BUFFER_SIZE), timeout: Default::default() }
+        Self { buffer: Vec::new(), timeout: Default::default() }
     }
 }
 
@@ -2407,6 +2407,24 @@ mod tests {
             assert_eq!(parser.state.sync_state.timeout.is_sync, 0);
             assert!(handler.attr.take().is_some());
         }
+    }
+
+    #[test]
+    fn sync_buffer_grows_lazily() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = MockHandler::default();
+        assert_eq!(parser.state.sync_state.buffer.capacity(), 0);
+
+        // One byte short of the limit stays synchronized.
+        parser.advance(&mut handler, b"\x1b[?2026h");
+        let fill = SYNC_BUFFER_SIZE - 2 - parser.sync_bytes_count();
+        parser.advance(&mut handler, "a".repeat(fill).as_bytes());
+        assert_eq!(parser.state.sync_state.timeout.is_sync, 1);
+        assert_eq!(parser.sync_bytes_count(), SYNC_BUFFER_SIZE - 2);
+
+        // The next byte aborts the update.
+        parser.advance(&mut handler, b"a");
+        assert_eq!(parser.state.sync_state.timeout.is_sync, 0);
     }
 
     #[test]

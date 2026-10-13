@@ -6,6 +6,7 @@ CHANGELOG
 - Character dropped after a UTF-8 codepoint split across two reads
 - Improve parsing performance of CSI sequences without intermediates
 - Add `Perform::print_str` and `Handler::input_str` for runs of printable ASCII
+- Allocate the synchronized update buffer on first use
 
 ## 0.15.0
 
