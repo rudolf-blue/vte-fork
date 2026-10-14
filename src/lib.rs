@@ -805,20 +805,60 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// string.
     #[inline]
     fn ground_dispatch_ascii<P: Perform>(performer: &mut P, text: &str) {
+        const LO: u64 = 0x0101_0101_0101_0101;
+        const HI: u64 = 0x8080_8080_8080_8080;
+
         let bytes = text.as_bytes();
         let mut start = 0;
-        while let Some(offset) = bytes[start..].iter().position(|&byte| byte < 0x20) {
-            let end = start + offset;
-            if offset > 0 {
-                performer.print_str(&text[start..end]);
+        let mut offset = 0;
+
+        // Find the control characters a word at a time.
+        while let Some(chunk) = bytes.get(offset..offset + 8) {
+            let word = u64::from_le_bytes(chunk.try_into().unwrap());
+
+            // All bytes are below 0x80, so the subtraction cannot borrow across
+            // bytes.
+            let mut controls = !((word | HI) - LO * 0x20) & HI;
+            while controls != 0 {
+                let end = offset + controls.trailing_zeros() as usize / 8;
+                Self::ground_dispatch_control(performer, text, start, end);
+                start = end + 1;
+                controls &= controls - 1;
             }
-            performer.execute(bytes[end]);
-            start = end + 1;
+
+            offset += 8;
+        }
+
+        for (index, &byte) in bytes[offset..].iter().enumerate() {
+            if byte < 0x20 {
+                Self::ground_dispatch_control(performer, text, start, offset + index);
+                start = offset + index + 1;
+            }
         }
 
         if start < bytes.len() {
             performer.print_str(&text[start..]);
         }
+    }
+
+    /// Print the text from `start` up to the control character at `end`, then
+    /// execute it.
+    #[inline]
+    fn ground_dispatch_control<P: Perform>(
+        performer: &mut P,
+        text: &str,
+        start: usize,
+        end: usize,
+    ) {
+        // Line based output is often a single character between control
+        // characters, which is cheaper to print directly than as a
+        // string.
+        if end == start + 1 {
+            performer.print(text.as_bytes()[start] as char);
+        } else if end > start {
+            performer.print_str(&text[start..end]);
+        }
+        performer.execute(text.as_bytes()[end]);
     }
 }
 
@@ -1016,6 +1056,32 @@ mod tests {
 
         fn execute(&mut self, byte: u8) {
             self.dispatched.push(Sequence::Execute(byte));
+        }
+    }
+
+    #[test]
+    fn parse_ascii_controls() {
+        for len in 0..24 {
+            for control in 0..len {
+                let mut input: Vec<u8> = (0..len).map(|i| b' ' + (i * 7 % 95) as u8).collect();
+                input[control] = b'\r';
+                if control + 2 < len {
+                    input[control + 2] = 0x1F;
+                }
+
+                let mut dispatcher = Dispatcher::default();
+                let mut parser = Parser::new();
+                parser.advance(&mut dispatcher, &input);
+
+                let expected: Vec<_> = input
+                    .iter()
+                    .map(|&byte| match byte {
+                        0x00..=0x1F => Sequence::Execute(byte),
+                        _ => Sequence::Print(byte as char),
+                    })
+                    .collect();
+                assert_eq!(dispatcher.dispatched, expected);
+            }
         }
     }
 
